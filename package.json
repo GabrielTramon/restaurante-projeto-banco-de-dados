@@ -1,0 +1,16 @@
+{
+  "name": "restaurante-projeto",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Monorepo do projeto de restaurante (backend + frontend)",
+  "scripts": {
+    "install:all": "yarn --cwd backend install && yarn --cwd frontend install",
+    "dev:backend": "yarn --cwd backend dev",
+    "dev:frontend": "yarn --cwd frontend dev",
+    "build:backend": "yarn --cwd backend build",
+    "build:frontend": "yarn --cwd frontend build",
+    "prisma:generate": "yarn --cwd backend prisma:generate",
+    "prisma:migrate": "yarn --cwd backend prisma:migrate",
+    "db:seed": "yarn --cwd backend db:seed"
+  }
+}

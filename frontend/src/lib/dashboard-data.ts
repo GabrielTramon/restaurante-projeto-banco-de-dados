@@ -1,7 +1,11 @@
+import { api } from "./api";
 import type {
+  Categoria,
   Mesa,
+  Pedido,
   PedidoResumo,
   PontoFaturamento,
+  Produto,
   ProdutoMaisVendido,
 } from "./types";
 
@@ -24,73 +28,171 @@ export interface DashboardData {
   mesas: Mesa[];
 }
 
-// Relógio relativo ao momento da renderização (no servidor).
-const agora = Date.now();
-const minAtras = (m: number) => new Date(agora - m * 60_000).toISOString();
+// Pedido cancelado não entra em faturamento nem nas estatísticas.
+const faturavel = (p: Pedido) => p.status !== "cancelado";
+
+const DIAS_SEMANA = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
+
+/** Zera as horas para comparar pedidos por dia de calendário (horário local). */
+function inicioDoDia(d: Date): Date {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+/** Variação percentual entre dois períodos, arredondada a 1 casa. */
+function variacaoPct(atual: number, anterior: number): number {
+  if (anterior === 0) return atual > 0 ? 100 : 0;
+  return Math.round(((atual - anterior) / anterior) * 1000) / 10;
+}
 
 /**
- * Retorna os dados do painel.
+ * Calcula os KPIs e listas do painel a partir dos dados reais da API.
  *
- * Hoje usa dados de demonstração (coerentes com a seed do backend) para o
- * painel já renderizar bonito sem o servidor no ar. Quando os endpoints de
- * pedidos/pagamentos existirem, troque o corpo por chamadas à API, por exemplo:
- *
- *   import { api } from "./api";
- *   const [produtos, mesas] = await Promise.all([
- *     api.get<Produto[]>("/api/produtos"),
- *     api.get<Mesa[]>("/api/mesas"),
- *   ]);
- *   ...calcule os KPIs a partir dos dados reais.
+ * Tudo é derivado dos pedidos/mesas/produtos cadastrados — não há mais dados
+ * fixos. Se a API estiver indisponível, devolve um painel vazio (zeros) para
+ * a página renderizar mesmo assim, em vez de quebrar.
  */
 export async function getDashboardData(): Promise<DashboardData> {
+  let pedidos: Pedido[] = [];
+  let mesas: Mesa[] = [];
+  let produtos: Produto[] = [];
+  let categorias: Categoria[] = [];
+
+  try {
+    [pedidos, mesas, produtos, categorias] = await Promise.all([
+      api.get<Pedido[]>("/api/pedidos"),
+      api.get<Mesa[]>("/api/mesas"),
+      api.get<Produto[]>("/api/produtos"),
+      api.get<Categoria[]>("/api/categorias"),
+    ]);
+  } catch {
+    // Backend fora do ar: devolve painel vazio em vez de derrubar a home.
+    return painelVazio();
+  }
+
+  const agora = new Date();
+  const inicioHoje = inicioDoDia(agora);
+  const inicioOntem = inicioDoDia(new Date(agora.getTime() - 86_400_000));
+
+  // ----- KPIs de hoje x ontem -----
+  let faturamentoHoje = 0;
+  let pedidosHoje = 0;
+  let faturamentoOntem = 0;
+  let pedidosOntem = 0;
+
+  for (const pedido of pedidos) {
+    if (!faturavel(pedido)) continue;
+    const data = new Date(pedido.dataHora);
+    if (data >= inicioHoje) {
+      faturamentoHoje += pedido.total;
+      pedidosHoje += 1;
+    } else if (data >= inicioOntem) {
+      faturamentoOntem += pedido.total;
+      pedidosOntem += 1;
+    }
+  }
+
+  const ticketMedio = pedidosHoje > 0 ? faturamentoHoje / pedidosHoje : 0;
+  const ticketOntem = pedidosOntem > 0 ? faturamentoOntem / pedidosOntem : 0;
+  const mesasEmUso = mesas.filter((m) => m.status === "ocupada").length;
+
+  // ----- Faturamento dos últimos 7 dias -----
+  const faturamentoSemana: PontoFaturamento[] = [];
+  for (let i = 6; i >= 0; i--) {
+    const dia = inicioDoDia(new Date(agora.getTime() - i * 86_400_000));
+    const fim = new Date(dia.getTime() + 86_400_000);
+    const valor = pedidos.reduce((acc, p) => {
+      if (!faturavel(p)) return acc;
+      const data = new Date(p.dataHora);
+      return data >= dia && data < fim ? acc + p.total : acc;
+    }, 0);
+    faturamentoSemana.push({ dia: DIAS_SEMANA[dia.getDay()], valor });
+  }
+
+  // ----- Produtos mais vendidos (agregado de todos os pedidos válidos) -----
+  const categoriaPorId = new Map(categorias.map((c) => [c.id, c.nome]));
+  const produtoPorId = new Map(produtos.map((p) => [p.id, p]));
+  const agregado = new Map<
+    number,
+    { nome: string; categoria: string; quantidade: number; receita: number }
+  >();
+
+  for (const pedido of pedidos) {
+    if (!faturavel(pedido)) continue;
+    for (const item of pedido.itens) {
+      const produto = produtoPorId.get(item.idProduto);
+      const categoria = produto
+        ? categoriaPorId.get(produto.idCategoria) ?? "—"
+        : "—";
+      const atual = agregado.get(item.idProduto) ?? {
+        nome: item.produtoNome,
+        categoria,
+        quantidade: 0,
+        receita: 0,
+      };
+      atual.quantidade += item.quantidade;
+      atual.receita += item.subtotal;
+      agregado.set(item.idProduto, atual);
+    }
+  }
+
+  const produtosMaisVendidos = [...agregado.values()]
+    .sort((a, b) => b.receita - a.receita)
+    .slice(0, 5);
+
+  // ----- Pedidos recentes (a API já retorna ordenado por dataHora desc) -----
+  const pedidosRecentes: PedidoResumo[] = pedidos.slice(0, 6).map((p) => ({
+    id: p.id,
+    cliente: p.cliente?.nome ?? "—",
+    mesa: p.mesa?.numero ?? null,
+    status: p.status,
+    total: p.total,
+    itens: p.itens.length,
+    horario: p.dataHora,
+  }));
+
   return {
     kpis: {
-      faturamentoHoje: 3210.5,
-      faturamentoDelta: 12.5,
-      pedidosHoje: 42,
-      pedidosDelta: 8,
-      mesasEmUso: 6,
-      totalMesas: 8,
-      ticketMedio: 76.4,
-      ticketDelta: 3.2,
+      faturamentoHoje,
+      faturamentoDelta: variacaoPct(faturamentoHoje, faturamentoOntem),
+      pedidosHoje,
+      pedidosDelta: variacaoPct(pedidosHoje, pedidosOntem),
+      mesasEmUso,
+      totalMesas: mesas.length,
+      ticketMedio,
+      ticketDelta: variacaoPct(ticketMedio, ticketOntem),
     },
+    faturamentoSemana,
+    pedidosRecentes,
+    produtosMaisVendidos,
+    mesas,
+  };
+}
 
-    faturamentoSemana: [
-      { dia: "Seg", valor: 1820 },
-      { dia: "Ter", valor: 2150 },
-      { dia: "Qua", valor: 1980 },
-      { dia: "Qui", valor: 2560 },
-      { dia: "Sex", valor: 3890 },
-      { dia: "Sáb", valor: 4620 },
-      { dia: "Dom", valor: 3210 },
-    ],
+/** Painel zerado, usado quando a API está indisponível. */
+function painelVazio(): DashboardData {
+  const agora = new Date();
+  const faturamentoSemana: PontoFaturamento[] = [];
+  for (let i = 6; i >= 0; i--) {
+    const dia = inicioDoDia(new Date(agora.getTime() - i * 86_400_000));
+    faturamentoSemana.push({ dia: DIAS_SEMANA[dia.getDay()], valor: 0 });
+  }
 
-    pedidosRecentes: [
-      { id: 1042, cliente: "Maria Oliveira", mesa: 2, status: "em_preparo", total: 114.0, itens: 3, horario: minAtras(5) },
-      { id: 1041, cliente: "Pedro Santos", mesa: 5, status: "aberto", total: 96.0, itens: 2, horario: minAtras(12) },
-      { id: 1040, cliente: "Lucia Ferreira", mesa: null, status: "pronto", total: 95.0, itens: 3, horario: minAtras(20) },
-      { id: 1039, cliente: "Rafael Alves", mesa: 6, status: "entregue", total: 139.0, itens: 3, horario: minAtras(35) },
-      { id: 1038, cliente: "Camila Rocha", mesa: 1, status: "entregue", total: 162.0, itens: 4, horario: minAtras(50) },
-      { id: 1037, cliente: "Bruno Carvalho", mesa: null, status: "cancelado", total: 78.0, itens: 2, horario: minAtras(65) },
-    ],
-
-    produtosMaisVendidos: [
-      { nome: "Picanha na Brasa", categoria: "Pratos", quantidade: 38, receita: 3382.0 },
-      { nome: "Risoto de Camarão", categoria: "Pratos", quantidade: 27, receita: 1836.0 },
-      { nome: "Caipirinha", categoria: "Bebidas", quantidade: 64, receita: 1408.0 },
-      { nome: "Parmegiana de Frango", categoria: "Pratos", quantidade: 22, receita: 1188.0 },
-      { nome: "Pudim de Leite", categoria: "Sobremesas", quantidade: 41, receita: 738.0 },
-    ],
-
-    mesas: [
-      { id: 1, numero: 1, capacidade: 2, status: "ocupada" },
-      { id: 2, numero: 2, capacidade: 4, status: "ocupada" },
-      { id: 3, numero: 3, capacidade: 6, status: "reservada" },
-      { id: 4, numero: 4, capacidade: 4, status: "disponivel" },
-      { id: 5, numero: 5, capacidade: 8, status: "ocupada" },
-      { id: 6, numero: 6, capacidade: 2, status: "ocupada" },
-      { id: 7, numero: 7, capacidade: 4, status: "reservada" },
-      { id: 8, numero: 8, capacidade: 6, status: "disponivel" },
-    ],
+  return {
+    kpis: {
+      faturamentoHoje: 0,
+      faturamentoDelta: 0,
+      pedidosHoje: 0,
+      pedidosDelta: 0,
+      mesasEmUso: 0,
+      totalMesas: 0,
+      ticketMedio: 0,
+      ticketDelta: 0,
+    },
+    faturamentoSemana,
+    pedidosRecentes: [],
+    produtosMaisVendidos: [],
+    mesas: [],
   };
 }

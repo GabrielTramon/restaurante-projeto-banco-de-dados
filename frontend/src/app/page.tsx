@@ -46,7 +46,11 @@ export default async function DashboardPage() {
           value={`${kpis.mesasEmUso}/${kpis.totalMesas}`}
           icon={Armchair}
           iconClassName="bg-brand-50 text-brand-600"
-          hint={`${Math.round((kpis.mesasEmUso / kpis.totalMesas) * 100)}% de ocupação`}
+          hint={
+            kpis.totalMesas > 0
+              ? `${Math.round((kpis.mesasEmUso / kpis.totalMesas) * 100)}% de ocupação`
+              : "Sem mesas cadastradas"
+          }
         />
         <StatCard
           title="Ticket médio"

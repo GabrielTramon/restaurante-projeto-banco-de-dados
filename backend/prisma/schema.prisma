@@ -1,0 +1,160 @@
+// Schema do Prisma para o SISTEMA DE RESTAURANTE
+// Convertido do schema PostgreSQL original.
+// Docs: https://pris.ly/d/prisma-schema
+//
+// Observacao: os CHECK com lista de valores (status, forma de pagamento)
+// foram convertidos para enums nativos do PostgreSQL. Os CHECK numericos
+// do SQL original (ex.: preco >= 0, capacidade > 0) nao tem representacao
+// no schema do Prisma e nao sao recriados automaticamente.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------- Enums -----------------------------
+
+enum MesaStatus {
+  disponivel
+  ocupada
+  reservada
+}
+
+enum ReservaStatus {
+  ativa
+  cancelada
+  concluida
+}
+
+enum PedidoStatus {
+  aberto
+  em_preparo
+  pronto
+  entregue
+  cancelado
+}
+
+enum FormaPagamento {
+  dinheiro
+  credito
+  debito
+  pix
+  voucher
+}
+
+// ----------------------------- Tabelas -----------------------------
+
+model Categoria {
+  id        Int       @id @default(autoincrement()) @map("id_categoria")
+  nome      String    @db.VarChar(100)
+  descricao String?   @db.Text
+  produtos  Produto[]
+
+  @@map("categoria")
+}
+
+model Produto {
+  id          Int          @id @default(autoincrement()) @map("id_produto")
+  idCategoria Int          @map("id_categoria")
+  nome        String       @db.VarChar(150)
+  descricao   String?      @db.Text
+  preco       Decimal      @db.Decimal(10, 2)
+  disponivel  Boolean      @default(true)
+  categoria   Categoria    @relation(fields: [idCategoria], references: [id])
+  itens       ItemPedido[]
+
+  @@map("produto")
+}
+
+model Funcionario {
+  id           Int      @id @default(autoincrement()) @map("id_funcionario")
+  nome         String   @db.VarChar(150)
+  cargo        String   @db.VarChar(100)
+  telefone     String?  @db.VarChar(20)
+  dataAdmissao DateTime @default(now()) @map("data_admissao") @db.Date
+  salario      Decimal  @db.Decimal(10, 2)
+  pedidos      Pedido[]
+
+  @@map("funcionario")
+}
+
+model Cliente {
+  id       Int       @id @default(autoincrement()) @map("id_cliente")
+  nome     String    @db.VarChar(150)
+  email    String?   @unique @db.VarChar(200)
+  telefone String?   @db.VarChar(20)
+  reservas Reserva[]
+  pedidos  Pedido[]
+
+  @@map("cliente")
+}
+
+model Mesa {
+  id         Int        @id @default(autoincrement()) @map("id_mesa")
+  numero     Int        @unique
+  capacidade Int
+  status     MesaStatus @default(disponivel)
+  reservas   Reserva[]
+  pedidos    Pedido[]
+
+  @@map("mesa")
+}
+
+model Reserva {
+  id         Int           @id @default(autoincrement()) @map("id_reserva")
+  idCliente  Int           @map("id_cliente")
+  idMesa     Int           @map("id_mesa")
+  dataHora   DateTime      @map("data_hora")
+  numPessoas Int           @map("num_pessoas")
+  status     ReservaStatus @default(ativa)
+  cliente    Cliente       @relation(fields: [idCliente], references: [id])
+  mesa       Mesa          @relation(fields: [idMesa], references: [id])
+
+  @@map("reserva")
+}
+
+model Pedido {
+  id            Int          @id @default(autoincrement()) @map("id_pedido")
+  dataHora      DateTime     @default(now()) @map("data_hora")
+  idMesa        Int?         @map("id_mesa")
+  idFuncionario Int?         @map("id_funcionario")
+  idCliente     Int?         @map("id_cliente")
+  status        PedidoStatus @default(aberto)
+  total         Decimal      @default(0) @db.Decimal(10, 2)
+  mesa          Mesa?        @relation(fields: [idMesa], references: [id])
+  funcionario   Funcionario? @relation(fields: [idFuncionario], references: [id])
+  cliente       Cliente?     @relation(fields: [idCliente], references: [id])
+  itens         ItemPedido[]
+  pagamento     Pagamento?
+
+  @@map("pedido")
+}
+
+model ItemPedido {
+  id         Int     @id @default(autoincrement()) @map("id_item")
+  idPedido   Int     @map("id_pedido")
+  idProduto  Int     @map("id_produto")
+  quantidade Int
+  precoUnit  Decimal @map("preco_unit") @db.Decimal(10, 2)
+  observacao String? @db.Text
+  pedido     Pedido  @relation(fields: [idPedido], references: [id], onDelete: Cascade)
+  produto    Produto @relation(fields: [idProduto], references: [id])
+
+  @@map("item_pedido")
+}
+
+model Pagamento {
+  id        Int            @id @default(autoincrement()) @map("id_pagamento")
+  idPedido  Int            @unique @map("id_pedido")
+  formaPgto FormaPagamento @map("forma_pgto")
+  valorPago Decimal        @map("valor_pago") @db.Decimal(10, 2)
+  troco     Decimal        @default(0) @db.Decimal(10, 2)
+  dataHora  DateTime       @default(now()) @map("data_hora")
+  pedido    Pedido         @relation(fields: [idPedido], references: [id])
+
+  @@map("pagamento")
+}
